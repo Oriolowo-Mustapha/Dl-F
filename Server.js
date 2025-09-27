@@ -208,47 +208,30 @@ app.post('/api/run-engine', async (req, res) => {
 
 // --- GEMINI AI MATCHING ENGINE LOGIC ---
 
-function createMatchingPrompt(items) {
-    const lostItems = items.filter(item => item.isLost).map(item => ({
-        id: item.itemId,
-        title: item.title,
-        description: item.description,
-        type: 'LOST'
-    }));
-
-    const foundItems = items.filter(item => !item.isLost).map(item => ({
-        id: item.itemId,
-        title: item.title,
-        description: item.description,
-        type: 'FOUND'
-    }));
-
-    if (lostItems.length === 0 || foundItems.length === 0) {
-        return null;
-    }
-
-    let prompt = "You are a lost and found matching service. Analyze the LOST items against the FOUND items.\n\n";
-    prompt += "Your task is to find the best possible match between ONE LOST item and ONE FOUND item based on title, description, and similarity. ONLY match items that are highly likely to be the same object.\n\n";
-    prompt += "LOST Items:\n";
-    lostItems.forEach(item => {
-        prompt += `ID: ${item.id}, Title: "${item.title}", Description: "${item.description}"\n`;
-    });
+function createSingleMatchPrompt(lostItem, foundItems) {
+    let prompt = `You are a lost and found matching service. Analyze the single LOST item and see if it matches any of the FOUND items in the list.\n\n`;
+    prompt += `Your task is to find the best possible match for the LOST item from the list of FOUND items based on title, description, and similarity. ONLY match items that are highly likely to be the same object.\n\n`;
+    prompt += `LOST Item:\n`;
+    prompt += `ID: ${lostItem.itemId}, Title: "${lostItem.title}", Description: "${lostItem.description}"\n`;
 
     prompt += "\nFOUND Items:\n";
     foundItems.forEach(item => {
-        prompt += `ID: ${item.id}, Title: "${item.title}", Description: "${item.description}"\n`;
+        prompt += `ID: ${item.itemId}, Title: "${item.title}", Description: "${item.description}"\n`;
     });
 
-    prompt += "\nOutput ONLY the result in the exact JSON format: {\"match\": {\"lostId\": [ID_NUMBER], \"foundId\": [ID_NUMBER], \"confidence\": \"[high/medium/low]\"}} or {\"match\": null} if no match is found.";
+    prompt += `\nIs there a high-confidence match for the LOST item in the list? If yes, output the result in the exact JSON format: {"match": {"lostId": ${lostItem.itemId}, "foundId": [ID_OF_FOUND_ITEM]}}. If no high-confidence match is found, output {"match": null}.`;
     
     return prompt;
 }
 
-async function getGeminiMatch(prompt) {
+async function getGeminiMatch(prompt, lostItemId) {
     if (!prompt) return null;
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2-minute timeout
+
     try {
-        const systemPrompt = "Analyze the item descriptions to find a single high-confidence match between a LOST item and a FOUND item. Output ONLY the resulting JSON object.";
+        const systemPrompt = "Analyze the item descriptions to find a single high-confidence match between the one LOST item and the list of FOUND items. Output ONLY the resulting JSON object.";
 
         const payload = {
             contents: [{ parts: [{ text: prompt }] }],
@@ -263,8 +246,7 @@ async function getGeminiMatch(prompt) {
                             nullable: true,
                             properties: {
                                 lostId: { type: "NUMBER" },
-                                foundId: { type: "NUMBER" },
-                                confidence: { type: "STRING" }
+                                foundId: { type: "NUMBER" }
                             }
                         }
                     }
@@ -277,7 +259,8 @@ async function getGeminiMatch(prompt) {
         const response = await fetch(apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: controller.signal
         });
         
         const result = await response.json();
@@ -285,15 +268,17 @@ async function getGeminiMatch(prompt) {
         
         if (jsonText) {
             const parsedJson = JSON.parse(jsonText);
-            if (parsedJson.match && parsedJson.match.confidence === 'high') {
+            if (parsedJson.match && parsedJson.match.foundId) {
                 return {
-                    lostId: Number(parsedJson.match.lostId),
+                    lostId: Number(lostItemId),
                     foundId: Number(parsedJson.match.foundId)
                 };
             }
         }
     } catch (e) {
         console.error("Gemini API or Parsing Error:", e);
+    } finally {
+        clearTimeout(timeoutId);
     }
     return null;
 }
@@ -306,7 +291,7 @@ async function getGeminiMatch(prompt) {
  * 4. Record the match on the FEVM.
  */
 async function runMatchingEngine() {
-    log("--- Starting Match Engine Run ---");
+    log("--- Starting Match Engine Run (New Simplified Logic) ---");
     try {
         // Aggressive fix: Force re-read of .env and re-create contract object on every run.
         log("Force-reloading .env and creating fresh contract instance...");
@@ -315,7 +300,7 @@ async function runMatchingEngine() {
         const currentContract = new ethers.Contract(process.env.CONTRACT_ADDRESS, CONTRACT_ABI, currentWallet);
         log(`Ensuring we are operating on contract: ${process.env.CONTRACT_ADDRESS}`);
 
-        log("Step 1/5: Fetching item count from contract...");
+        log("Step 1/3: Fetching all items from contract...");
         const totalItemsBN = await currentContract.getItemCount();
         const totalItems = Number(totalItemsBN);
         log(`Found ${totalItems - 1} total items.`);
@@ -325,71 +310,63 @@ async function runMatchingEngine() {
             return null;
         }
         
-        log("Step 2/5: Fetching all unmatched items...");
+        log("Step 2/3: Sorting items into Lost, Found, and Matched...");
         const allItems = [];
         for (let id = 1; id < totalItems; id++) {
-            log(`- Checking item ID ${id}...`);
             const itemData = await currentContract.getItem(id);
             const matchedIdBN = await currentContract.matchedItem(id);
-            const matchedId = Number(matchedIdBN);
-            
-            if (matchedId === 0) {
-                log(`  -> Item ${id} is unmatched. Adding to list.`);
-                allItems.push({
-                    itemId: Number(itemData[0]),
-                    reporter: itemData[1],
-                    isLost: itemData[2],
-                    title: itemData[3],
-                    description: itemData[4],
-                    ipfsCid: itemData[5]
+            allItems.push({
+                itemId: Number(itemData[0]),
+                isLost: itemData[2],
+                title: itemData[3],
+                description: itemData[4],
+                matchedId: Number(matchedIdBN)
+            });
+        }
+
+        const unmatchedLostItems = allItems.filter(item => item.isLost && item.matchedId === 0);
+        const unmatchedFoundItems = allItems.filter(item => !item.isLost && item.matchedId === 0);
+
+        if (unmatchedLostItems.length === 0 || unmatchedFoundItems.length === 0) {
+            log("No unmatched items of both types to compare. Exiting.");
+            return null;
+        }
+
+        log(`Found ${unmatchedLostItems.length} unmatched lost items and ${unmatchedFoundItems.length} unmatched found items.`);
+        log("Step 3/3: Iterating through lost items to find a match...");
+
+        for (const lostItem of unmatchedLostItems) {
+            log(`- Searching for a match for LOST item ID: ${lostItem.itemId} ("${lostItem.title}")`);
+            const prompt = createSingleMatchPrompt(lostItem, unmatchedFoundItems);
+            const match = await getGeminiMatch(prompt, lostItem.itemId);
+
+            if (match) {
+                log(`  -> SUCCESS: AI found a high-confidence match! Lost ID ${match.lostId} <-> Found ID ${match.foundId}`);
+                log("  -> Submitting match transaction to blockchain...");
+                
+                const tx = await currentContract.recordMatch(match.lostId, match.foundId);
+                log(`    - Submitted match transaction: ${tx.hash}`);
+
+                tx.wait().then(receipt => {
+                    log(`    - SUCCESS: Match transaction ${receipt.hash} confirmed!`);
+                }).catch(error => {
+                    console.error(`    - ERROR: Match transaction ${tx.hash} failed to confirm:`, error);
                 });
+
+                log("--- Match Engine Run Finished (Match Found) ---");
+                return tx.hash; // Exit after finding and submitting the first match.
             } else {
-                log(`  -> Item ${id} is already matched. Skipping.`);
+                log(`  -> No match found for item ${lostItem.itemId}. Moving to next item.`);
             }
         }
-        log(`Found ${allItems.length} unmatched items.`);
 
-        if (allItems.length < 2) {
-            log("Not enough unique, unmatched items to run AI. Exiting.");
-            return null;
-        }
-
-        log("Step 3/5: Creating prompt for Gemini AI...");
-        const prompt = createMatchingPrompt(allItems);
-        if (!prompt) {
-            log("Could not create prompt (not enough lost/found items). Exiting.");
-            return null;
-        }
-        log("Prompt created successfully.");
-
-        log("Step 4/5: Sending prompt to Gemini AI for matching...");
-        const match = await getGeminiMatch(prompt);
-        log("Received response from Gemini.");
-
-        if (match) {
-            log(`Found HIGH CONFIDENCE match: LOST ID ${match.lostId} <-> FOUND ID ${match.foundId}`);
-            log("Step 5/5: Submitting match transaction to blockchain...");
-            const tx = await currentContract.recordMatch(match.lostId, match.foundId);
-            log(`Submitting match transaction: ${tx.hash}`);
-
-            tx.wait().then(receipt => {
-                log(`SUCCESS: Match transaction ${receipt.hash} confirmed!`);
-            }).catch(error => {
-                console.error(`ERROR: Match transaction ${tx.hash} failed to confirm:`, error);
-            });
-
-            log("--- Match Engine Run Finished ---");
-            return tx.hash;
-        } else {
-            log("No high-confidence match found in this cycle.");
-            log("--- Match Engine Run Finished ---");
-            return null;
-        }
+        log("--- Match Engine Run Finished (No New Matches Found) ---");
+        return null;
 
     } catch (error) {
         console.error("CRITICAL: Error during matching engine run:", error);
         log("--- Match Engine Run Finished with CRITICAL ERROR ---");
-        throw error; // Re-throw the error so the API endpoint can catch it
+        throw error;
     }
 }
 
