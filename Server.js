@@ -8,6 +8,12 @@ import FormData from 'form-data';
 import fs from 'fs'; 
 import { ethers } from 'ethers';
 import { GoogleGenAI } from '@google/genai';
+import path from 'path'; 
+import { fileURLToPath } from 'url'; 
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 
 // --- CONFIGURATION & ENV VAR CHECKS ---
 const PINATA_API_KEY = 'b6242205f4820452afbd'; // Keep these hardcoded if they are part of your application logic
@@ -80,7 +86,7 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-app.use(express.static('public')); 
+app.use(express.static(path.join(__dirname, 'public')));
 
 // --- PINATA UPLOAD ENDPOINT ---
 app.post('/api/pin-image', upload.single('file'), async (req, res) => {
