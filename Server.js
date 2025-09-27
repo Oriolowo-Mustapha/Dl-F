@@ -80,6 +80,8 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
+app.use(express.static('public')); 
+
 // --- PINATA UPLOAD ENDPOINT ---
 app.post('/api/pin-image', upload.single('file'), async (req, res) => {
     if (!req.file) {
