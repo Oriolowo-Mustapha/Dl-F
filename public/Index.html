@@ -3,29 +3,186 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DL&F - Sign In</title>
-    <link rel="stylesheet" href="style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&display=swap" rel="stylesheet">
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <title>DL&F - Decentralized Lost & Found Dashboard</title>
+    <link rel="stylesheet" href="dashboard.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
 </head>
-<body>
+<body class="min-h-screen">
+
+    <!-- Refactored Container to use custom CSS -->
     <div class="container">
-        <h1>Decentralized Lost & Found</h1>
-        <p>Please sign in with your Google Account to continue.</p>
-        <div id="g_id_onload"
-     data-client_id="683235475325-535chghblq6fpi7upd5cqihdl1mbjqd3.apps.googleusercontent.com"
-     data-callback="handleCredentialResponse"
-     data-auto_prompt="false">
-</div>
-<div class="g_id_signin"
-     data-type="standard"
-     data-size="large"
-     data-theme="outline"
-     data-text="sign_in_with"
-     data-shape="rectangular"
-     data-logo_alignment="left">
-</div>
+        <header>
+            <h1 style="font-weight: bold;">Decentralized Lost & Found</h1>
+            <p style="color: #434043; font-weight: 600; margin-bottom: 20px;">Your Reported Items Dashboard</p>
+        </header>
+
+        <!-- Wallet Status Area -->
+        <div id="walletStatus">
+            <span id="accountInfo">Wallet not connected.</span>
+            <button id="connectWalletButton">
+                Connect Wallet
+            </button>
+        </div>
+        <p id="message" style="margin-top: -10px; margin-bottom: 20px; font-size: 0.9em;"></p>
+
+        <!-- Reporting Actions -->
+        <div class="report-actions">
+            <a href="report-lost.html" class="lost-report-btn button-link">
+                Report LOST Item
+            </a>
+            <a href="report-found.html" class="found-report-btn button-link">
+                Report FOUND Item
+            </a>
+        </div>
+
+        <!-- Items List Dashboard -->
+        <section>
+            <h2 style="font-size: 1.5em; font-weight: bold; margin-bottom: 20px; color: #434043;">Reported Items on FEVM</h2>
+            <div id="itemsList">
+                <p id="loadingStatus">Please connect your wallet to load items...</p>
+            </div>
+        </section>
+
     </div>
-    <script src="./script.js"></script>
+
+    <script>
+        // --- Contract Configuration (Kept same) ---
+        const CONTRACT_ADDRESS = '0x344944376d6ec39058e3883d62b851828139d247'; 
+        const CONTRACT_ABI = [
+            "function getItemCount() public view returns (uint256)",
+            "function getItem(uint256 _itemId) view returns (uint256 id, address reporter, bool isLost, string memory title, string memory description, string memory ipfsCid)",
+            "function matchedItem(uint256) view returns (uint256)",
+            "event ItemReported(uint256 indexed itemId, address indexed reporter, bool isLost, string title, string ipfsCid)",
+            "event MatchFound(uint256 indexed itemId1, uint256 indexed itemId2)"
+        ];
+
+        // --- Global Variables ---
+        let provider;
+        let contract;
+
+        // --- DOM Elements ---
+        const connectWalletButton = document.getElementById('connectWalletButton');
+        const accountInfo = document.getElementById('accountInfo');
+        const messageArea = document.getElementById('message');
+        const itemsList = document.getElementById('itemsList');
+        const loadingStatus = document.getElementById('loadingStatus');
+
+        // --- Utility Functions ---
+
+        function formatAddress(address) {
+            return `${address.substring(0, 6)}...${address.substring(38)}`;
+        }
+        
+        // --- Core Logic (Unchanged) ---
+
+        async function connectWallet() {
+            messageArea.textContent = 'Connecting...';
+            if (!window.ethereum || typeof ethers === 'undefined') { 
+                messageArea.textContent = 'Error: MetaMask or compatible wallet not detected.';
+                return;
+            }
+
+            try {
+                await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+                provider = new ethers.BrowserProvider(window.ethereum);
+                const signer = await provider.getSigner();
+
+                contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+
+                const address = await signer.getAddress();
+                accountInfo.textContent = `Connected: ${formatAddress(address)}`;
+                connectWalletButton.style.display = 'none';
+                messageArea.textContent = 'Wallet connected successfully. Loading items...';
+                loadingStatus.textContent = 'Loading items from Filecoin FEVM...';
+
+                await fetchAndDisplayItems();
+
+            } catch (error) {
+                console.error("Wallet connection failed:", error);
+                messageArea.textContent = 'Connection failed. Ensure MetaMask is unlocked and on the Filecoin network.';
+            }
+        }
+
+        async function fetchAndDisplayItems() {
+            if (!contract) {
+                messageArea.textContent = 'Error: Contract not initialized.';
+                return;
+            }
+
+            try {
+                const totalItemsBN = await contract.getItemCount();
+                const totalItems = Number(totalItemsBN);
+                
+                if (totalItems <= 1) { 
+                    loadingStatus.textContent = 'No items have been reported yet.';
+                    return;
+                }
+
+                itemsList.innerHTML = ''; // Clear loading message
+
+                // Iterate through all item IDs (starting at 1)
+                for (let id = 1; id < totalItems; id++) {
+                    const itemData = await contract.getItem(id);
+                    const [itemId, reporter, isLost, title, description, ipfsCid] = itemData;
+
+                    const matchedIdBN = await contract.matchedItem(itemId);
+                    const matchedId = Number(matchedIdBN);
+
+                    renderItemCard({ itemId, reporter, isLost, title, description, ipfsCid, matchedId });
+                }
+                messageArea.textContent = `Successfully loaded ${totalItems - 1} items.`;
+                
+            } catch (error) {
+                console.error("Error fetching items:", error);
+                loadingStatus.textContent = 'Error loading items. Check contract address and network.';
+            }
+        }
+
+        /* --- Refactored to use custom CSS classes --- */
+        function renderItemCard(item) {
+            const statusClass = item.isLost ? 'lost-item' : 'found-item';
+            const badgeClass = item.isLost ? 'badge-lost' : 'badge-found';
+            const statusText = item.isLost ? 'LOST' : 'FOUND';
+            
+            let matchBadgeHtml = '';
+            if (item.matchedId > 0) {
+                matchBadgeHtml = `<span class="status-badge badge-match">
+                    ✅ MATCH FOUND (ID: ${item.matchedId})
+                </span>`;
+            } else {
+                matchBadgeHtml = `<span class="status-badge badge-pending">
+                    🔍 Awaiting Match...
+                </span>`;
+            }
+
+            const cardHtml = `
+                <div class="item-card ${statusClass}">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 5px;">
+                        <h3 style="font-weight: bold; color: #434043;">${item.title} (ID: ${item.itemId})</h3>
+                        <span class="status-badge ${badgeClass}">${statusText}</span>
+                    </div>
+                    <p style="color: #434043; margin-bottom: 10px; font-size: 0.9em; font-style: italic;">${item.description}</p>
+                    <div style="font-size: 0.85em; margin-bottom: 10px;">
+                        <p><strong>Reporter:</strong> <span style="font-family: monospace;">${formatAddress(item.reporter)}</span></p>
+                        ${item.ipfsCid ? `<p><strong>IPFS CID:</strong> <a href="https://ipfs.io/ipfs/${item.ipfsCid}" target="_blank" style="color: #434043; text-decoration: underline;">${item.ipfsCid.substring(0, 10)}...</a></p>` : `<p><strong>IPFS CID:</strong> None</p>`}
+                    </div>
+                    <div style="padding-top: 10px; border-top: 1px solid #43404330;">
+                        ${matchBadgeHtml}
+                    </div>
+                </div>
+            `;
+            itemsList.insertAdjacentHTML('beforeend', cardHtml);
+        }
+
+        // --- Event Listeners and Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            connectWalletButton.addEventListener('click', connectWallet);
+            
+            if (window.ethereum && window.ethereum.selectedAddress) {
+                connectWallet();
+            }
+        });
+    </script>
 </body>
 </html>

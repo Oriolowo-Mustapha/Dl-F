@@ -1,0 +1,126 @@
+body {
+    font-family: 'Montserrat', sans-serif;
+    background-color: #faf9af; /* Light Yellow */
+    color: #434043; /* Dark Gray */
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+
+.container {
+    background-color: #b7b2ac; /* Muted Gray */
+    padding: 40px;
+    border-radius: 10px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.2);
+    text-align: center;
+    max-width: 600px; /* Slightly wider for the dashboard content */
+    width: 100%;
+}
+
+h1 {
+    color: #434043;
+    margin-bottom: 20px;
+}
+
+/* Styling for the Wallet Status Area */
+#walletStatus {
+    background-color: #faf9af;
+    padding: 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.9em;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+/* --- Buttons and Links --- */
+button, a.button-link {
+    background-color: #434043;
+    color: #faf9af;
+    padding: 10px 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: 'Montserrat', sans-serif;
+    text-decoration: none;
+    display: inline-block;
+    transition: opacity 0.2s;
+}
+
+button:hover, a.button-link:hover {
+    opacity: 0.85;
+}
+
+/* Specific Report Buttons */
+.report-actions {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 30px;
+}
+.report-actions a {
+    flex: 1;
+    padding: 15px;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+
+.lost-report-btn {
+    background-color: #ef4444; /* Lost Red */
+    color: white;
+}
+.found-report-btn {
+    background-color: #facc15; /* Found Yellow */
+    color: #434043;
+}
+
+/* --- Items List --- */
+#itemsList {
+    margin-top: 20px;
+    text-align: left;
+    padding: 0;
+    list-style: none;
+}
+
+.item-card {
+    background-color: #faf9af;
+    padding: 15px;
+    border-radius: 5px;
+    margin-bottom: 15px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    border-left: 8px solid #434043; /* Default border */
+}
+
+.item-card.lost-item { border-left-color: #ef4444; }
+.item-card.found-item { border-left-color: #facc15; }
+
+.item-card h3 {
+    margin-top: 0;
+    margin-bottom: 5px;
+    font-size: 1.2em;
+}
+
+/* Status Badges */
+.status-badge {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: bold;
+    margin-left: 10px;
+}
+
+.badge-lost { background-color: #ef4444; color: white; }
+.badge-found { background-color: #facc15; color: #434043; }
+.badge-match { background-color: #10b981; color: white; }
+.badge-pending { background-color: #b7b2ac; color: #434043; }
+
+#loadingStatus {
+    text-align: center;
+    font-style: italic;
+    padding: 20px;
+}

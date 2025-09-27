@@ -1,173 +1,317 @@
-const express = require('express');
-const cors = require('cors');   // <--- ADD THIS
-const session = require('express-session');
-require('dotenv').config({ path: './credential.env' });
-const { Pool } = require('pg');
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const { OAuth2Client } = require('google-auth-library');
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+import dotenv from 'dotenv';
+dotenv.config({ path: 'credential.env' });
+import express from 'express';
+import multer from 'multer';
+import axios from 'axios';
+import cors from 'cors'; 
+import FormData from 'form-data';
+import fs from 'fs'; 
+import { ethers } from 'ethers';
+import { GoogleGenAI } from '@google/genai';
 
+// --- CONFIGURATION & ENV VAR CHECKS ---
+const PINATA_API_KEY = 'b6242205f4820452afbd'; // Keep these hardcoded if they are part of your application logic
+const PINATA_SECRET_API_KEY = '80e27d2221f00432763b56bad7e15e78fd34f116d43aee6ba90c3e9345a58187';
 
+// Get configuration from .env file
+const {
+    MATCHING_ENGINE_PRIVATE_KEY, // IMPORTANT: Must be the 64-character SECRET key!
+    CONTRACT_ADDRESS, 
+    FEVM_RPC_URL, 
+    GEMINI_API_KEY 
+} = process.env;
+
+// Essential Environment Check
+const pkLength = MATCHING_ENGINE_PRIVATE_KEY ? MATCHING_ENGINE_PRIVATE_KEY.length : 0;
+if (pkLength < 64) {
+    console.error(`ERROR: Private key length is ${pkLength}. It must be 64 (or 66 with '0x' prefix) characters long.`);
+    throw new Error("MATCHING_ENGINE_PRIVATE_KEY not set or invalid (must be 64-character SECRET key). FIX YOUR .ENV FILE.");
+}
+if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not set in environment variables.");
+}
+if (!CONTRACT_ADDRESS) {
+    throw new Error("CONTRACT_ADDRESS is not set in environment variables.");
+}
+if (!FEVM_RPC_URL) {
+    throw new Error("FEVM_RPC_URL is not set in environment variables.");
+}
+
+// --- INITIALIZATION ---
 const app = express();
 const port = 3000;
+const upload = multer();
+const ai = new GoogleGenAI(GEMINI_API_KEY);
 
-app.use(cors({
-    origin: '*',
-    credentials: true
-}));
+// Simple logging function <--- MOVED TO TOP
+const log = (msg) => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 
-const pool = new Pool({
-    user: process.env.PGUSER,
-    host: process.env.PGHOST,
-    database: process.env.PGDATABASE,
-    password: process.env.PGPASSWORD,
-    port: process.env.PGPORT,
-});
+// FEVM Setup
+let provider;
+let providerType;
 
-// --- Middleware ---
+if (FEVM_RPC_URL.startsWith('ws') || FEVM_RPC_URL.startsWith('WSS')) {
+    // ⚠️ Use WebSocketProvider for real-time events
+    provider = new ethers.WebSocketProvider(FEVM_RPC_URL);
+    providerType = 'WebSocket';
+} else {
+    // Use JsonRpcProvider for standard RPC calls
+    provider = new ethers.JsonRpcProvider(FEVM_RPC_URL);
+    providerType = 'HTTP/JSON-RPC';
+}
 
-// Passport.js setup
-passport.serializeUser((user, done) => {
-    done(null, user.id);
-});
+// Now 'log' is accessible
+log(`Provider initialized using: ${providerType} (${FEVM_RPC_URL})`);
 
-passport.deserializeUser(async (id, done) => {
-    try {
-        const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
-        const user = result.rows[0];
-        done(null, user);
-    } catch (err) {
-        done(err, null);
-    }
-});
+// The Wallet instantiation remains simple...
+const wallet = new ethers.Wallet(MATCHING_ENGINE_PRIVATE_KEY, provider);
 
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: '/auth/google/callback'
-},
-async (accessToken, refreshToken, profile, done) => {
-    try {
-        let user = await pool.query('SELECT * FROM users WHERE google_id = $1', [profile.id]);
-        if (user.rows.length === 0) {
-            // New user
-            user = await pool.query(
-                'INSERT INTO users (google_id, name, email, picture) VALUES ($1, $2, $3, $4) RETURNING *',
-                [profile.id, profile.displayName, profile.emails[0].value, profile.photos[0].value]
-            );
-        }
-        done(null, user.rows[0]);
-    } catch (err) {
-        done(err, null);
-    }
-}));
+// Contract ABI (Combined list of needed functions)
+const CONTRACT_ABI = [
+    // Read functions
+    "function getItemCount() public view returns (uint256)",
+    "function getItem(uint256 _itemId) view returns (uint256 id, address reporter, bool isLost, string memory title, string memory description, string memory ipfsCid)",
+    "function matchedItem(uint256) view returns (uint256)",
+    // Write function
+    "function recordMatch(uint256 lostId, uint256 foundId) external",
+    // Events
+    "event ItemReported(uint256 indexed itemId, address indexed reporter, bool isLost, string title, string ipfsCid)",
+    "event MatchFound(uint256 indexed itemId1, uint256 indexed itemId2)"
+];
+const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 
-app.use(passport.initialize());
-app.use(passport.session());
-
+// --- EXPRESS MIDDLEWARE ---
+app.use(cors({ origin: '*' })); 
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(session({
-    secret: 'supersecretkey',
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: false }
-}));
 
-// --- Routes ---
-const apiRouter = express.Router();
-app.use('/api', apiRouter);
+// --- PINATA UPLOAD ENDPOINT (RESTORED FROM PREVIOUS CODE) ---
+app.post('/api/pin-image', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded.' });
+    }
 
-app.use(express.static('public'));
-
-// Google OAuth routes
-app.get('/auth/google',
-    passport.authenticate('google', { scope: ['profile', 'email'] }));
-
-app.get('/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: '/' }),
-    (req, res) => {
-        // Successful authentication, redirect to dashboard.
-        res.redirect('/dashboard.html');
-    });
-
-app.post('/auth/google', async (req, res) => {
-    const { idToken } = req.body;
     try {
-        const ticket = await client.verifyIdToken({
-            idToken: idToken,
-            audience: process.env.GOOGLE_CLIENT_ID,
-        });
-        const payload = ticket.getPayload();
-        const googleId = payload['sub'];
-        const email = payload['email'];
-        const name = payload['name'];
-        const picture = payload['picture'];
+        const PINATA_URL = "https://api.pinata.cloud/pinning/pinFileToIPFS";
+        const fileBuffer = req.file.buffer;
+        const fileName = req.file.originalname;
+        const mimeType = req.file.mimetype;
 
-        let user = await pool.query('SELECT * FROM users WHERE google_id = $1', [googleId]);
-        if (user.rows.length === 0) {
-            user = await pool.query(
-                'INSERT INTO users (google_id, name, email, picture) VALUES ($1, $2, $3, $4) RETURNING *',
-                [googleId, name, email, picture]
-            );
-        }
-        req.login(user.rows[0], (err) => {
-            if (err) {
-                console.error(err);
-                return res.status(500).send({ message: 'Error logging in.' });
+        const formData = new FormData();
+
+        // Pinata requires the file to be streamed
+        formData.append('file', fileBuffer, {
+            filepath: fileName, 
+            contentType: mimeType
+        });
+
+        const response = await axios.post(
+            PINATA_URL, 
+            formData, 
+            {
+                maxBodyLength: Infinity,
+                headers: {
+                    ...formData.getHeaders(),
+                    'pinata_api_key': PINATA_API_KEY,
+                    'pinata_secret_api_key': PINATA_SECRET_API_KEY
+                }
             }
-            res.status(200).send({ message: 'Signed in successfully.' });
-        });
-    } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: 'Internal server error.' });
-    }
-});
-
-const isAuthenticated = (req, res, next) => {
-    if (req.isAuthenticated()) {
-        next();
-    } else {
-        res.status(401).send({ message: 'Not authenticated.' });
-    }
-};
-
-app.post('/report', isAuthenticated, async (req, res) => {
-    const { title, description, ipfsCid } = req.body;
-    try {
-        await pool.query(
-            'INSERT INTO files (user_id, cid, title, description) VALUES ($1, $2, $3, $4)',
-            [req.user.id, ipfsCid, title, description]
         );
-        res.status(200).send({ message: 'Item reported successfully.' });
+
+        log(`Image pinned. CID: ${response.data.IpfsHash}`);
+        res.status(200).json({ IpfsHash: response.data.IpfsHash });
+
     } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: 'Internal server error.' });
+        console.error("Pinata Error:", error.response ? error.response.data : error.message);
+        res.status(500).json({ error: 'Failed to pin file to IPFS.' });
     }
 });
 
-app.get('/dashboard', isAuthenticated, async (req, res) => {
-    try {
-        const result = await pool.query('SELECT * FROM files WHERE user_id = $1', [req.user.id]);
-        res.status(200).send(result.rows);
-    } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: 'Internal server error.' });
-    }
-});
 
-app.post('/logout', (req, res) => {
-    req.logout((err) => {
-        if (err) {
-            console.error(err);
-            return res.status(500).send({ message: 'Error logging out.' });
-        }
-        req.session.destroy();
-        res.status(200).send({ message: 'Logged out successfully.' });
+// --- GEMINI AI MATCHING ENGINE LOGIC ---
+
+/**
+ * Converts a list of reported items into a prompt suitable for Gemini
+ * @param {Array<Object>} items 
+ * @returns {string} The structured prompt
+ */
+function createMatchingPrompt(items) {
+    const lostItems = items.filter(item => item.isLost).map(item => ({
+        id: item.itemId,
+        title: item.title,
+        description: item.description,
+        type: 'LOST'
+    }));
+
+    const foundItems = items.filter(item => !item.isLost).map(item => ({
+        id: item.itemId,
+        title: item.title,
+        description: item.description,
+        type: 'FOUND'
+    }));
+
+    if (lostItems.length === 0 || foundItems.length === 0) {
+        return null;
+    }
+
+    let prompt = "You are a lost and found matching service. Analyze the LOST items against the FOUND items.\n\n";
+    prompt += "Your task is to find the best possible match between ONE LOST item and ONE FOUND item based on title, description, and similarity. ONLY match items that are highly likely to be the same object.\n\n";
+    prompt += "LOST Items:\n";
+    lostItems.forEach(item => {
+        prompt += `ID: ${item.id}, Title: "${item.title}", Description: "${item.description}"\n`;
     });
+
+    prompt += "\nFOUND Items:\n";
+    foundItems.forEach(item => {
+        prompt += `ID: ${item.id}, Title: "${item.title}", Description: "${item.description}"\n`;
+    });
+
+    prompt += "\nOutput ONLY the result in the exact JSON format: {\"match\": {\"lostId\": [ID_NUMBER], \"foundId\": [ID_NUMBER], \"confidence\": \"[high/medium/low]\"}} or {\"match\": null} if no match is found.";
+    
+    return prompt;
+}
+
+/**
+ * Sends the matching prompt to Gemini and gets the structured JSON response.
+ * @param {string} prompt 
+ * @returns {Promise<{lostId: number, foundId: number} | null>}
+ */
+async function getGeminiMatch(prompt) {
+    if (!prompt) return null;
+
+    try {
+        const systemPrompt = "Analyze the item descriptions to find a single high-confidence match between a LOST item and a FOUND item. Output ONLY the resulting JSON object.";
+
+        const payload = {
+            contents: [{ parts: [{ text: prompt }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "OBJECT",
+                    properties: {
+                        match: {
+                            type: "OBJECT",
+                            nullable: true,
+                            properties: {
+                                lostId: { type: "NUMBER" },
+                                foundId: { type: "NUMBER" },
+                                confidence: { type: "STRING" }
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // Note: The model name for text generation is usually gemini-2.5-flash-preview-05-20
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+        
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        
+        const result = await response.json();
+        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        
+        if (jsonText) {
+            const parsedJson = JSON.parse(jsonText);
+            if (parsedJson.match && parsedJson.match.confidence === 'high') {
+                return {
+                    lostId: Number(parsedJson.match.lostId),
+                    foundId: Number(parsedJson.match.foundId)
+                };
+            }
+        }
+    } catch (e) {
+        console.error("Gemini API or Parsing Error:", e);
+    }
+    return null;
+}
+
+/**
+ * Main function to run the matching engine:
+ * 1. Fetch all reported items.
+ * 2. Filter out already matched items.
+ * 3. Send data to Gemini for matching.
+ * 4. Record the match on the FEVM.
+ */
+async function runMatchingEngine() {
+    try {
+        // The first call to a contract method will not trigger the ENS lookup.
+        const totalItemsBN = await contract.getItemCount();
+        const totalItems = Number(totalItemsBN);
+        log(`Total items reported on chain: ${totalItems - 1}`);
+
+        if (totalItems <= 1) {
+            return;
+        }
+        
+        // 1. Fetch all items and check match status
+        const allItems = [];
+        for (let id = 1; id < totalItems; id++) {
+            const itemData = await contract.getItem(id);
+            const matchedIdBN = await contract.matchedItem(id);
+            const matchedId = Number(matchedIdBN);
+            
+            if (matchedId === 0) { // Only consider items that haven't been matched yet
+                allItems.push({
+                    itemId: Number(itemData[0]),
+                    reporter: itemData[1],
+                    isLost: itemData[2],
+                    title: itemData[3],
+                    description: itemData[4],
+                    ipfsCid: itemData[5]
+                });
+            }
+        }
+
+        if (allItems.length < 2) {
+            log("Not enough unique, unmatched items to run AI. Waiting...");
+            return;
+        }
+
+        // 2. Run Gemini Matching
+        const prompt = createMatchingPrompt(allItems);
+        const match = await getGeminiMatch(prompt);
+
+        // 3. Record Match on FEVM
+        if (match) {
+            log(`Found HIGH CONFIDENCE match: LOST ID ${match.lostId} <-> FOUND ID ${match.foundId}`);
+            
+            // Transaction to record the match
+            const tx = await contract.recordMatch(match.lostId, match.foundId);
+            log(`Submitting match transaction: ${tx.hash}`);
+            await tx.wait(); // Wait for confirmation
+            log("Match recorded successfully on the FEVM!");
+        } else {
+            log("No high-confidence match found in this cycle.");
+        }
+
+    } catch (error) {
+        // We leave the robust logging here for any actual transaction errors that occur.
+        console.error("CRITICAL: Error during matching engine run:", error);
+    }
+}
+
+// Start listening for new items immediately and then run on an interval
+contract.on("ItemReported", (itemId, reporter, isLost, title, ipfsCid, event) => {
+    const type = isLost ? 'LOST' : 'FOUND';
+    log(`NEW ITEM: ${type} ID ${Number(itemId)} reported by ${reporter}. Triggering match engine...`);
+    // Immediately run the engine when a new item arrives
+    runMatchingEngine();
 });
 
+// Run the engine periodically as a backup (e.g., every 5 minutes)
+log("Starting periodic match engine (runs every 5 minutes)...");
+setInterval(runMatchingEngine, 300000); 
+
+// Run once on startup
+runMatchingEngine();
+
+// --- START SERVER ---
 app.listen(port, () => {
-    console.log(`Server listening at http://localhost:${port}`);
+    log(`Backend server running at http://localhost:${port}`);
+    log(`Engine Wallet Address: ${wallet.address}`);
 });

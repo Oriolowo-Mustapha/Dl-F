@@ -1,156 +1,233 @@
-window.handleCredentialResponse = async (response) => {
-    const idToken = response.credential;
+const CONTRACT_ADDRESS = '0x344944376d6ec39058e3883d62b851828139d247';
+const CONTRACT_ABI = [
+    // Write Functions
+    "function reportLost(string memory _title, string memory _description, string memory _ipfsCid) public",
+    "function reportFound(string memory _title, string memory _description, string memory _ipfsCid) public",
+    
+    // View Functions   
+    "function getItemCount() public view returns (uint256)",
+    "function getItem(uint256 _itemId) view returns (uint256 id, address reporter, bool isLost, string memory title, string memory description, string memory ipfsCid)",
+    "function matchedItem(uint256) view returns (uint256)", // Getter for mapping matchedItem
+    
+    // Events
+    "event ItemReported(uint256 indexed itemId, address indexed reporter, bool isLost, string title, string ipfsCid)",
+    "event MatchFound(uint256 indexed itemId1, uint256 indexed itemId2)"
+];
+
+const BACKEND_URL = 'http://localhost:3000'; 
+
+
+let provider;
+let signer;
+let contract;
+
+const connectWalletButton = document.getElementById('connectWalletButton');
+const walletStatus = document.getElementById('walletStatus');
+const messageArea = document.getElementById('message');
+const submitButton = document.getElementById('submitButton');
+
+// 1. Wallet Connection Handler
+async function connectWallet() {
+    messageArea.textContent = 'Connecting...';
+    // The ethers global is now available thanks to the corrected CDN link
+    if (!window.ethereum || typeof ethers === 'undefined') { 
+        messageArea.textContent = 'Error: MetaMask or compatible wallet not detected, or Ethers.js failed to load.';
+        return;
+    }
+
     try {
-        const res = await fetch('/auth/google', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ idToken }),
-        });
+        // Request account access
+        await window.ethereum.request({ method: 'eth_requestAccounts' });
 
-        if (res.ok) {
-            setTimeout(() => {
-                window.location.href = '/dashboard.html';
-            }, 200); 
-        } else {
-            alert('Google Sign-in failed.');
-        }
+        // Initialize Ethers provider and signer (v6 syntax: BrowserProvider)
+        provider = new ethers.BrowserProvider(window.ethereum);
+        signer = await provider.getSigner();
+
+        // Instantiate the contract with the signer
+        contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+
+        const address = await signer.getAddress();
+        walletStatus.textContent = `Connected: ${address.substring(0, 6)}...${address.substring(38)}`;
+        submitButton.disabled = false;
+        messageArea.textContent = 'Wallet connected successfully. Ready to submit.';
+
+        // OPTIONAL: Add listeners for account/network changes
+        window.ethereum.on('accountsChanged', () => window.location.reload());
+        window.ethereum.on('chainChanged', () => window.location.reload());
+
     } catch (error) {
-        console.error(error);
-        alert('An error occurred during Google Sign-in.');
+        console.error("Wallet connection failed:", error);
+        messageArea.textContent = 'Connection failed. Ensure you are on the Filecoin network (e.g., Calibration Testnet).';
+        walletStatus.textContent = 'Wallet not connected.';
+        submitButton.disabled = true;
     }
-};
+}
+
+// 2. IPFS Upload Function (Calls secure backend)
+async function pinImageToIPFS(imageFile) {
+    if (!imageFile) return '';
+
+    messageArea.textContent = '1/2: Uploading image to Filecoin/IPFS via backend...';
+    
+    const formData = new FormData();
+    formData.append("file", imageFile);
+
+    const res = await fetch(`${BACKEND_URL}/api/pin-image`, {
+        method: "POST",
+        body: formData,
+        // The backend should handle the Content-Type for FormData
+    });
+
+    if (!res.ok) {
+        throw new Error(`IPFS pin failed with status: ${res.status}`);
+    }
+
+    const resData = await res.json();
+    return resData.IpfsHash;
+}
+
+
+// 3. Smart Contract Transaction Function
+async function submitLostReport() {
+    const title = document.getElementById('itemTitle').value;
+    const description = document.getElementById('itemDescription').value;
+    const imageFile = document.getElementById('itemImage').files[0];
+
+    if (!title || !description) {
+        messageArea.textContent = 'Please provide both a title and a description.';
+        return;
+    }
+    if (!contract) {
+        messageArea.textContent = 'Error: Wallet not connected or contract not initialized.';
+        return;
+    }
+
+    submitButton.disabled = true;
+    submitButton.textContent = 'Submitting...';
+    messageArea.textContent = 'Processing...';
+
+    let ipfsCid = '';
+
+    try {
+        // Step A: Upload image to IPFS securely via the backend
+        if (imageFile) {
+            ipfsCid = await pinImageToIPFS(imageFile);
+            messageArea.textContent = `2/2: Image pinned (CID: ${ipfsCid}). Sending transaction to FEVM...`;
+        } else {
+             messageArea.textContent = `1/1: No image to pin. Sending transaction to FEVM...`;
+        }
+        
+
+        // Step B: Send transaction to the FEVM contract
+        // The ethers object is available globally here
+        const tx = await contract.reportLost(title, description, ipfsCid);
+        
+        // Wait for the transaction to be mined (this is the Filecoin interaction)
+        const receipt = await tx.wait(); 
+
+        messageArea.textContent = `Report successful! Tx Hash: ${receipt.hash}`;
+        
+        // Clear form (Optional)
+        document.getElementById('itemTitle').value = '';
+        document.getElementById('itemDescription').value = '';
+        document.getElementById('itemImage').value = '';
+
+    } catch (error) {
+        console.error("Transaction Error:", error);
+        // Display a user-friendly error message, especially for Metamask rejections
+        const errorText = error.shortMessage || error.message || 'Check console for details.';
+        messageArea.textContent = `Transaction failed: ${errorText}`;
+    } finally {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Submit Report (Transaction)';
+    }
+}
+
+// In script.js
+
+// 3. New Smart Contract Transaction Function for Found Items
+async function submitFoundReport() {
+    const title = document.getElementById('itemTitle').value;
+    const description = document.getElementById('itemDescription').value;
+    const imageFile = document.getElementById('itemImage').files[0];
+
+    // --- Validation ---
+    if (!title || !description) {
+        messageArea.textContent = 'Please provide both a title and a description.';
+        return;
+    }
+    if (!contract) {
+        messageArea.textContent = 'Error: Wallet not connected or contract not initialized.';
+        return;
+    }
+
+    submitButton.disabled = true;
+    submitButton.textContent = 'Submitting Found Item...';
+    messageArea.textContent = 'Processing...';
+
+    let ipfsCid = '';
+
+    try {
+        // Step A: Upload image to IPFS securely via the backend (Reusing pinImageToIPFS)
+        if (imageFile) {
+            ipfsCid = await pinImageToIPFS(imageFile);
+            messageArea.textContent = `2/2: Image pinned (CID: ${ipfsCid}). Sending 'Found' transaction to FEVM...`;
+        } else {
+            messageArea.textContent = `1/1: No image to pin. Sending 'Found' transaction to FEVM...`;
+        }
+        
+        // Step B: Send transaction to the FEVM contract
+        // *** CRITICAL CHANGE: Calling the new reportFound function ***
+        const tx = await contract.reportFound(title, description, ipfsCid);
+        
+        // Wait for the transaction to be mined
+        const receipt = await tx.wait(); 
+
+        messageArea.textContent = `Found Item Report successful! Tx Hash: ${receipt.hash}`;
+        
+        // Clear form
+        document.getElementById('itemTitle').value = '';
+        document.getElementById('itemDescription').value = '';
+        document.getElementById('itemImage').value = '';
+
+    } catch (error) {
+        console.error("Found Item Transaction Error:", error);
+        // Display a user-friendly error message
+        const errorText = error.shortMessage || error.message || 'Check console for details.';
+        messageArea.textContent = `Transaction failed: ${errorText}`;
+    } finally {
+        submitButton.disabled = false;
+        submitButton.textContent = 'Submit Report (Transaction)';
+    }
+}   
+
+function setupSubmitHandler() {
+    const pageType = document.body.getAttribute('data-page');
+
+    let handlerFunction;
+
+    if (pageType === 'lost') {
+        handlerFunction = submitLostReport;
+        submitButton.textContent = 'Submit Lost Report (Transaction)'; 
+        
+    } else if (pageType === 'found') {
+        handlerFunction = submitFoundReport;
+        submitButton.textContent = 'Submit Found Report (Transaction)';
+        
+    } else {
+        messageArea.textContent = 'Error: Could not determine page type for submission.';
+        submitButton.disabled = true;
+        return;
+    }
+    submitButton.addEventListener('click', handlerFunction);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    const baseUrl = 'http://localhost:3000';
+    connectWalletButton.addEventListener('click', connectWallet);
+    
+    setupSubmitHandler();
 
-    const signInButton = document.getElementById('signInButton');
-    const itemsList = document.getElementById('itemsList');
-    const submitButton = document.getElementById('submitButton');
-    const submitComplaintButton = document.getElementById('submitComplaintButton');
-
-    if (itemsList) {
-        const logoutButton = document.createElement('button');
-        logoutButton.textContent = 'Logout';
-        logoutButton.addEventListener('click', async () => {
-            await fetch(`${baseUrl}/api/logout`, { method: 'POST' });
-            window.location.href = '/index.html';
-        });
-        document.querySelector('.container').appendChild(logoutButton);
-
-        (async () => {
-            try {
-                const response = await fetch(`${baseUrl}/api/dashboard`);
-                if (response.ok) {
-                    const items = await response.json();
-                    if (items.length === 0) {
-                        itemsList.innerHTML = '<p>You have not reported any items yet.</p>';
-                    } else {
-                        items.forEach(item => {
-                            const itemElement = document.createElement('div');
-                            itemElement.classList.add('item');
-                            itemElement.innerHTML = `
-                                <h3>${item.title}</h3>
-                                <p>${item.description}</p>
-                                ${item.ipfsCid ? `<a href="https://gateway.pinata.cloud/ipfs/${item.ipfsCid}" target="_blank">View Image</a>` : ''}
-                                <p>Status: ${item.status}</p>
-                            `;
-                            itemsList.appendChild(itemElement);
-                        });
-                    }
-                } else {
-                    window.location.href = '/index.html';
-                }
-            } catch (error) {
-                console.error(error);
-                window.location.href = '/index.html';
-            }
-        })();
-    }
-
-    if (submitButton) {
-        submitButton.addEventListener('click', async () => {
-            const title = document.getElementById('itemTitle').value;
-            const description = document.getElementById('itemDescription').value;
-            const imageFile = document.getElementById('itemImage').files[0];
-
-            if (!title || !description) {
-                alert('Please provide both a title and a description.');
-                return;
-            }
-
-            submitButton.disabled = true;
-            submitButton.textContent = 'Submitting...';
-
-            let ipfsCid = '';
-
-            try {
-                if (imageFile) {
-                    const formData = new FormData();
-                    formData.append("file", imageFile);
-
-                    const res = await fetch("https://api.pinata.cloud/pinning/pinFileToIPFS", {
-                        method: "POST",
-                        headers: {
-                            pinata_api_key: '0971526a919278cf45d5',
-                            pinata_secret_api_key: '8a3e484caef88d61a933126a0e1c4aa1981daf34f0b6915280037c6d227faac1',
-                        },
-                        body: formData,
-                    });
-
-                    const resData = await res.json();
-                    ipfsCid = resData.IpfsHash;
-                }
-
-                const reportResponse = await fetch(`${baseUrl}/api/report`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ title, description, ipfsCid }),
-                });
-
-                if (reportResponse.ok) {
-                    window.location.href = '/dashboard.html';
-                } else {
-                    alert('Failed to report item.');
-                }
-
-            } catch (error) {
-                console.error(error);
-                alert('An error occurred while reporting the item.');
-            } finally {
-                submitButton.disabled = false;
-                submitButton.textContent = 'Submit Report';
-            }
-        });
-    }
-
-    if (submitComplaintButton) {
-        submitComplaintButton.addEventListener('click', async () => {
-            const subject = document.getElementById('complaintSubject').value;
-            const body = document.getElementById('complaintBody').value;
-
-            if (!subject || !body) {
-                alert('Please provide both a subject and a message.');
-                return;
-            }
-
-            const response = await fetch(`${baseUrl}/api/complaint`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ subject, body }),
-            });
-
-            if (response.ok) {
-                alert('Complaint submitted successfully.');
-                document.getElementById('complaintSubject').value = '';
-                document.getElementById('complaintBody').value = '';
-            } else {
-                alert('Failed to submit complaint.');
-            }
-        });
+    if (window.ethereum && window.ethereum.selectedAddress) {
+        connectWallet();
     }
 });
