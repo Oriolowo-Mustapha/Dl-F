@@ -39,11 +39,10 @@ if (!FEVM_RPC_URL) {
 
 // --- INITIALIZATION ---
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;;
 const upload = multer();
 const ai = new GoogleGenAI(GEMINI_API_KEY);
 
-// Simple logging function <--- MOVED TO TOP
 const log = (msg) => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 
 // FEVM Setup
@@ -51,16 +50,13 @@ let provider;
 let providerType;
 
 if (FEVM_RPC_URL.startsWith('ws') || FEVM_RPC_URL.startsWith('WSS')) {
-    // ⚠️ Use WebSocketProvider for real-time events
     provider = new ethers.WebSocketProvider(FEVM_RPC_URL);
     providerType = 'WebSocket';
 } else {
-    // Use JsonRpcProvider for standard RPC calls
     provider = new ethers.JsonRpcProvider(FEVM_RPC_URL);
     providerType = 'HTTP/JSON-RPC';
 }
 
-// Now 'log' is accessible
 log(`Provider initialized using: ${providerType} (${FEVM_RPC_URL})`);
 
 // The Wallet instantiation remains simple...
@@ -84,7 +80,7 @@ const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-// --- PINATA UPLOAD ENDPOINT (RESTORED FROM PREVIOUS CODE) ---
+// --- PINATA UPLOAD ENDPOINT ---
 app.post('/api/pin-image', upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No file uploaded.' });
@@ -98,7 +94,6 @@ app.post('/api/pin-image', upload.single('file'), async (req, res) => {
 
         const formData = new FormData();
 
-        // Pinata requires the file to be streamed
         formData.append('file', fileBuffer, {
             filepath: fileName, 
             contentType: mimeType
@@ -129,11 +124,6 @@ app.post('/api/pin-image', upload.single('file'), async (req, res) => {
 
 // --- GEMINI AI MATCHING ENGINE LOGIC ---
 
-/**
- * Converts a list of reported items into a prompt suitable for Gemini
- * @param {Array<Object>} items 
- * @returns {string} The structured prompt
- */
 function createMatchingPrompt(items) {
     const lostItems = items.filter(item => item.isLost).map(item => ({
         id: item.itemId,
@@ -170,11 +160,6 @@ function createMatchingPrompt(items) {
     return prompt;
 }
 
-/**
- * Sends the matching prompt to Gemini and gets the structured JSON response.
- * @param {string} prompt 
- * @returns {Promise<{lostId: number, foundId: number} | null>}
- */
 async function getGeminiMatch(prompt) {
     if (!prompt) return null;
 
@@ -203,7 +188,6 @@ async function getGeminiMatch(prompt) {
             }
         };
 
-        // Note: The model name for text generation is usually gemini-2.5-flash-preview-05-20
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
         
         const response = await fetch(apiUrl, {
@@ -299,7 +283,6 @@ async function runMatchingEngine() {
 contract.on("ItemReported", (itemId, reporter, isLost, title, ipfsCid, event) => {
     const type = isLost ? 'LOST' : 'FOUND';
     log(`NEW ITEM: ${type} ID ${Number(itemId)} reported by ${reporter}. Triggering match engine...`);
-    // Immediately run the engine when a new item arrives
     runMatchingEngine();
 });
 

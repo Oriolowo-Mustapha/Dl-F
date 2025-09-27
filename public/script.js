@@ -29,21 +29,17 @@ const submitButton = document.getElementById('submitButton');
 // 1. Wallet Connection Handler
 async function connectWallet() {
     messageArea.textContent = 'Connecting...';
-    // The ethers global is now available thanks to the corrected CDN link
     if (!window.ethereum || typeof ethers === 'undefined') { 
         messageArea.textContent = 'Error: MetaMask or compatible wallet not detected, or Ethers.js failed to load.';
         return;
     }
 
     try {
-        // Request account access
         await window.ethereum.request({ method: 'eth_requestAccounts' });
 
-        // Initialize Ethers provider and signer (v6 syntax: BrowserProvider)
         provider = new ethers.BrowserProvider(window.ethereum);
         signer = await provider.getSigner();
 
-        // Instantiate the contract with the signer
         contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
 
         const address = await signer.getAddress();
@@ -51,7 +47,6 @@ async function connectWallet() {
         submitButton.disabled = false;
         messageArea.textContent = 'Wallet connected successfully. Ready to submit.';
 
-        // OPTIONAL: Add listeners for account/network changes
         window.ethereum.on('accountsChanged', () => window.location.reload());
         window.ethereum.on('chainChanged', () => window.location.reload());
 
@@ -75,7 +70,6 @@ async function pinImageToIPFS(imageFile) {
     const res = await fetch(`${BACKEND_URL}/api/pin-image`, {
         method: "POST",
         body: formData,
-        // The backend should handle the Content-Type for FormData
     });
 
     if (!res.ok) {
@@ -109,7 +103,6 @@ async function submitLostReport() {
     let ipfsCid = '';
 
     try {
-        // Step A: Upload image to IPFS securely via the backend
         if (imageFile) {
             ipfsCid = await pinImageToIPFS(imageFile);
             messageArea.textContent = `2/2: Image pinned (CID: ${ipfsCid}). Sending transaction to FEVM...`;
@@ -118,23 +111,18 @@ async function submitLostReport() {
         }
         
 
-        // Step B: Send transaction to the FEVM contract
-        // The ethers object is available globally here
         const tx = await contract.reportLost(title, description, ipfsCid);
         
-        // Wait for the transaction to be mined (this is the Filecoin interaction)
         const receipt = await tx.wait(); 
 
         messageArea.textContent = `Report successful! Tx Hash: ${receipt.hash}`;
         
-        // Clear form (Optional)
         document.getElementById('itemTitle').value = '';
         document.getElementById('itemDescription').value = '';
         document.getElementById('itemImage').value = '';
 
     } catch (error) {
         console.error("Transaction Error:", error);
-        // Display a user-friendly error message, especially for Metamask rejections
         const errorText = error.shortMessage || error.message || 'Check console for details.';
         messageArea.textContent = `Transaction failed: ${errorText}`;
     } finally {
@@ -143,7 +131,6 @@ async function submitLostReport() {
     }
 }
 
-// In script.js
 
 // 3. New Smart Contract Transaction Function for Found Items
 async function submitFoundReport() {
@@ -151,7 +138,6 @@ async function submitFoundReport() {
     const description = document.getElementById('itemDescription').value;
     const imageFile = document.getElementById('itemImage').files[0];
 
-    // --- Validation ---
     if (!title || !description) {
         messageArea.textContent = 'Please provide both a title and a description.';
         return;
@@ -168,7 +154,6 @@ async function submitFoundReport() {
     let ipfsCid = '';
 
     try {
-        // Step A: Upload image to IPFS securely via the backend (Reusing pinImageToIPFS)
         if (imageFile) {
             ipfsCid = await pinImageToIPFS(imageFile);
             messageArea.textContent = `2/2: Image pinned (CID: ${ipfsCid}). Sending 'Found' transaction to FEVM...`;
@@ -176,23 +161,18 @@ async function submitFoundReport() {
             messageArea.textContent = `1/1: No image to pin. Sending 'Found' transaction to FEVM...`;
         }
         
-        // Step B: Send transaction to the FEVM contract
-        // *** CRITICAL CHANGE: Calling the new reportFound function ***
         const tx = await contract.reportFound(title, description, ipfsCid);
         
-        // Wait for the transaction to be mined
         const receipt = await tx.wait(); 
 
         messageArea.textContent = `Found Item Report successful! Tx Hash: ${receipt.hash}`;
         
-        // Clear form
         document.getElementById('itemTitle').value = '';
         document.getElementById('itemDescription').value = '';
         document.getElementById('itemImage').value = '';
 
     } catch (error) {
         console.error("Found Item Transaction Error:", error);
-        // Display a user-friendly error message
         const errorText = error.shortMessage || error.message || 'Check console for details.';
         messageArea.textContent = `Transaction failed: ${errorText}`;
     } finally {

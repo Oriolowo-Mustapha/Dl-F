@@ -46,7 +46,6 @@
     </div>
 
     <script>
-        // --- Contract Configuration (Kept same) ---
         const CONTRACT_ADDRESS = '0x344944376d6ec39058e3883d62b851828139d247'; 
         const CONTRACT_ABI = [
             "function getItemCount() public view returns (uint256)",
@@ -73,7 +72,7 @@
             return `${address.substring(0, 6)}...${address.substring(38)}`;
         }
         
-        // --- Core Logic (Unchanged) ---
+        // --- Core Logic---
 
         async function connectWallet() {
             messageArea.textContent = 'Connecting...';
@@ -119,9 +118,8 @@
                     return;
                 }
 
-                itemsList.innerHTML = ''; // Clear loading message
+                itemsList.innerHTML = ''; 
 
-                // Iterate through all item IDs (starting at 1)
                 for (let id = 1; id < totalItems; id++) {
                     const itemData = await contract.getItem(id);
                     const [itemId, reporter, isLost, title, description, ipfsCid] = itemData;
@@ -139,7 +137,6 @@
             }
         }
 
-        /* --- Refactored to use custom CSS classes --- */
         function renderItemCard(item) {
             const statusClass = item.isLost ? 'lost-item' : 'found-item';
             const badgeClass = item.isLost ? 'badge-lost' : 'badge-found';
