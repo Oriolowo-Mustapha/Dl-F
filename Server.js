@@ -1,3 +1,38 @@
+let isResetting = false;
+function resetProvider() {
+    if (isResetting) return;
+    isResetting = true;
+    log("CRITICAL: Unhandled provider error detected. Resetting provider in 10 seconds...");
+
+    if (contract) {
+        try {
+            contract.removeAllListeners();
+        } catch (e) {
+            console.error("Error removing listeners:", e);
+        }
+    }
+    provider = null;
+    wallet = null;
+    contract = null;
+
+    setTimeout(() => {
+        isResetting = false;
+        initializeProvider();
+    }, 10000);
+}
+
+process.on('uncaughtException', (error, origin) => {
+    console.error('----- UNCAUGHT EXCEPTION ----- ');
+    console.error('Caught exception:', error);
+    console.error('Exception origin:', origin);
+    console.error('------------------------------');
+
+    // If the error is the one we're looking for, reset the provider.
+    if (error.code === 'ECONNRESET') {
+        resetProvider();
+    }
+});
+
 import dotenv from 'dotenv';
 dotenv.config({ path: 'credential.env' });
 import express from 'express';
@@ -21,7 +56,7 @@ const PINATA_SECRET_API_KEY = '80e27d2221f00432763b56bad7e15e78fd34f116d43aee6ba
 
 // Get configuration from .env file
 const {
-    MATCHING_ENGINE_PRIVATE_KEY, // IMPORTANT: Must be the 64-character SECRET key!
+    MATCHING_ENGINE_PRIVATE_KEY,
     CONTRACT_ADDRESS, 
     FEVM_RPC_URL, 
     GEMINI_API_KEY 
@@ -51,36 +86,61 @@ const ai = new GoogleGenAI(GEMINI_API_KEY);
 
 const log = (msg) => console.log(`[${new Date().toLocaleTimeString()}] ${msg}`);
 
-// FEVM Setup
+// --- FEVM Setup ---
 let provider;
+let wallet;
+let contract;
 let providerType;
 
-if (FEVM_RPC_URL.startsWith('ws') || FEVM_RPC_URL.startsWith('WSS')) {
-    provider = new ethers.WebSocketProvider(FEVM_RPC_URL);
-    providerType = 'WebSocket';
-} else {
-    provider = new ethers.JsonRpcProvider(FEVM_RPC_URL);
-    providerType = 'HTTP/JSON-RPC';
-}
-
-log(`Provider initialized using: ${providerType} (${FEVM_RPC_URL})`);
-
-// The Wallet instantiation remains simple...
-const wallet = new ethers.Wallet(MATCHING_ENGINE_PRIVATE_KEY, provider);
-
-// Contract ABI (Combined list of needed functions)
 const CONTRACT_ABI = [
-    // Read functions
     "function getItemCount() public view returns (uint256)",
     "function getItem(uint256 _itemId) view returns (uint256 id, address reporter, bool isLost, string memory title, string memory description, string memory ipfsCid)",
     "function matchedItem(uint256) view returns (uint256)",
-    // Write function
     "function recordMatch(uint256 lostId, uint256 foundId) external",
-    // Events
     "event ItemReported(uint256 indexed itemId, address indexed reporter, bool isLost, string title, string ipfsCid)",
     "event MatchFound(uint256 indexed itemId1, uint256 indexed itemId2)"
 ];
-const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+
+function initializeProvider() {
+    log("Initializing provider...");
+    if (FEVM_RPC_URL.startsWith('ws') || FEVM_RPC_URL.startsWith('WSS')) {
+        provider = new ethers.WebSocketProvider(FEVM_RPC_URL);
+        providerType = 'WebSocket';
+
+        // The WebSocketProvider will automatically attempt to reconnect on errors and close events.
+        // We can listen for the 'error' event on the provider itself to log any issues.
+        provider.on('error', (err) => {
+            console.error("Ethers.js Provider Error:", err);
+        });
+
+    } else {
+        provider = new ethers.JsonRpcProvider(FEVM_RPC_URL);
+        providerType = 'HTTP/JSON-RPC';
+    }
+
+    wallet = new ethers.Wallet(MATCHING_ENGINE_PRIVATE_KEY, provider);
+    contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+    log(`Provider initialized using: ${providerType} (${FEVM_RPC_URL})`);
+    log(`Engine Wallet Address: ${wallet.address}`);
+
+    // Re-attach event listeners
+    attachContractListeners();
+    // Run once on startup
+    runMatchingEngine();
+}
+
+function attachContractListeners() {
+    if (!contract) return;
+    // Start listening for new items immediately and then run on an interval
+    contract.on("ItemReported", (itemId, reporter, isLost, title, ipfsCid, event) => {
+        const type = isLost ? 'LOST' : 'FOUND';
+        log(`NEW ITEM: ${type} ID ${Number(itemId)} reported by ${reporter}. Triggering match engine...`);
+        runMatchingEngine();
+    });
+}
+
+// Initial setup
+initializeProvider();
 
 // --- EXPRESS MIDDLEWARE ---
 app.use(cors({ origin: '*' })); 
@@ -126,6 +186,22 @@ app.post('/api/pin-image', upload.single('file'), async (req, res) => {
     } catch (error) {
         console.error("Pinata Error:", error.response ? error.response.data : error.message);
         res.status(500).json({ error: 'Failed to pin file to IPFS.' });
+    }
+});
+
+// --- MANUAL TRIGGER FOR AI ENGINE ---
+app.post('/api/run-engine', async (req, res) => {
+    log("Manual match engine run triggered via API.");
+    try {
+        const txHash = await runMatchingEngine();
+        if (txHash) {
+            res.status(200).json({ message: `Matching engine run completed. Match transaction submitted: ${txHash}` });
+        } else {
+            res.status(200).json({ message: "Matching engine run completed. No new match found." });
+        }
+    } catch (error) {
+        console.error("Error during manual engine run:", error);
+        res.status(500).json({ message: "Matching engine run failed.", error: error.message });
     }
 });
 
@@ -230,24 +306,35 @@ async function getGeminiMatch(prompt) {
  * 4. Record the match on the FEVM.
  */
 async function runMatchingEngine() {
+    log("--- Starting Match Engine Run ---");
     try {
-        // The first call to a contract method will not trigger the ENS lookup.
-        const totalItemsBN = await contract.getItemCount();
+        // Aggressive fix: Force re-read of .env and re-create contract object on every run.
+        log("Force-reloading .env and creating fresh contract instance...");
+        dotenv.config({ path: 'credential.env', override: true });
+        const currentWallet = new ethers.Wallet(process.env.MATCHING_ENGINE_PRIVATE_KEY, provider);
+        const currentContract = new ethers.Contract(process.env.CONTRACT_ADDRESS, CONTRACT_ABI, currentWallet);
+        log(`Ensuring we are operating on contract: ${process.env.CONTRACT_ADDRESS}`);
+
+        log("Step 1/5: Fetching item count from contract...");
+        const totalItemsBN = await currentContract.getItemCount();
         const totalItems = Number(totalItemsBN);
-        log(`Total items reported on chain: ${totalItems - 1}`);
+        log(`Found ${totalItems - 1} total items.`);
 
         if (totalItems <= 1) {
-            return;
+            log("Not enough items to run matching. Exiting.");
+            return null;
         }
         
-        // 1. Fetch all items and check match status
+        log("Step 2/5: Fetching all unmatched items...");
         const allItems = [];
         for (let id = 1; id < totalItems; id++) {
-            const itemData = await contract.getItem(id);
-            const matchedIdBN = await contract.matchedItem(id);
+            log(`- Checking item ID ${id}...`);
+            const itemData = await currentContract.getItem(id);
+            const matchedIdBN = await currentContract.matchedItem(id);
             const matchedId = Number(matchedIdBN);
             
-            if (matchedId === 0) { // Only consider items that haven't been matched yet
+            if (matchedId === 0) {
+                log(`  -> Item ${id} is unmatched. Adding to list.`);
                 allItems.push({
                     itemId: Number(itemData[0]),
                     reporter: itemData[1],
@@ -256,53 +343,73 @@ async function runMatchingEngine() {
                     description: itemData[4],
                     ipfsCid: itemData[5]
                 });
+            } else {
+                log(`  -> Item ${id} is already matched. Skipping.`);
             }
         }
+        log(`Found ${allItems.length} unmatched items.`);
 
         if (allItems.length < 2) {
-            log("Not enough unique, unmatched items to run AI. Waiting...");
-            return;
+            log("Not enough unique, unmatched items to run AI. Exiting.");
+            return null;
         }
 
-        // 2. Run Gemini Matching
+        log("Step 3/5: Creating prompt for Gemini AI...");
         const prompt = createMatchingPrompt(allItems);
-        const match = await getGeminiMatch(prompt);
+        if (!prompt) {
+            log("Could not create prompt (not enough lost/found items). Exiting.");
+            return null;
+        }
+        log("Prompt created successfully.");
 
-        // 3. Record Match on FEVM
+        log("Step 4/5: Sending prompt to Gemini AI for matching...");
+        const match = await getGeminiMatch(prompt);
+        log("Received response from Gemini.");
+
         if (match) {
             log(`Found HIGH CONFIDENCE match: LOST ID ${match.lostId} <-> FOUND ID ${match.foundId}`);
-            
-            // Transaction to record the match
-            const tx = await contract.recordMatch(match.lostId, match.foundId);
+            log("Step 5/5: Submitting match transaction to blockchain...");
+            const tx = await currentContract.recordMatch(match.lostId, match.foundId);
             log(`Submitting match transaction: ${tx.hash}`);
-            await tx.wait(); // Wait for confirmation
-            log("Match recorded successfully on the FEVM!");
+
+            tx.wait().then(receipt => {
+                log(`SUCCESS: Match transaction ${receipt.hash} confirmed!`);
+            }).catch(error => {
+                console.error(`ERROR: Match transaction ${tx.hash} failed to confirm:`, error);
+            });
+
+            log("--- Match Engine Run Finished ---");
+            return tx.hash;
         } else {
             log("No high-confidence match found in this cycle.");
+            log("--- Match Engine Run Finished ---");
+            return null;
         }
 
     } catch (error) {
-        // We leave the robust logging here for any actual transaction errors that occur.
         console.error("CRITICAL: Error during matching engine run:", error);
+        log("--- Match Engine Run Finished with CRITICAL ERROR ---");
+        throw error; // Re-throw the error so the API endpoint can catch it
     }
 }
 
 // Start listening for new items immediately and then run on an interval
-contract.on("ItemReported", (itemId, reporter, isLost, title, ipfsCid, event) => {
-    const type = isLost ? 'LOST' : 'FOUND';
-    log(`NEW ITEM: ${type} ID ${Number(itemId)} reported by ${reporter}. Triggering match engine...`);
-    runMatchingEngine();
-});
 
-// Run the engine periodically as a backup (e.g., every 5 minutes)
-log("Starting periodic match engine (runs every 5 minutes)...");
-setInterval(runMatchingEngine, 300000); 
 
-// Run once on startup
-runMatchingEngine();
+let serverStarted = false;
+function startServer() {
+    if (serverStarted) return;
+    serverStarted = true;
 
-// --- START SERVER ---
-app.listen(port, () => {
-    log(`Backend server running at http://localhost:${port}`);
-    log(`Engine Wallet Address: ${wallet.address}`);
-});
+        // Run the engine periodically as a backup (e.g., every 5 minutes)
+        log("Starting periodic match engine (runs every 5 minutes)...");
+        setInterval(runMatchingEngine, 300000);
+    // --- START SERVER ---
+    app.listen(port, () => {
+        log(`Backend server running at http://localhost:${port}`);
+    });
+}
+
+// Initial setup
+initializeProvider();
+startServer();

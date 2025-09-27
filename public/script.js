@@ -1,4 +1,4 @@
-const CONTRACT_ADDRESS = '0x344944376d6ec39058e3883d62b851828139d247';
+const CONTRACT_ADDRESS = '0x809d7ad00d37f8047ed4b741e0fafe52e7183c89';
 const CONTRACT_ABI = [
     // Write Functions
     "function reportLost(string memory _title, string memory _description, string memory _ipfsCid) public",

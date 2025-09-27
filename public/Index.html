@@ -33,6 +33,9 @@
             <a href="report-found.html" class="found-report-btn button-link">
                 Report FOUND Item
             </a>
+            <button id="runEngineButton" class="button-link" style="background-color: #4CAF50;">
+                Trigger AI Match Engine
+            </button>
         </div>
 
         <!-- Items List Dashboard -->
@@ -46,7 +49,7 @@
     </div>
 
     <script>
-        const CONTRACT_ADDRESS = '0x344944376d6ec39058e3883d62b851828139d247'; 
+        const CONTRACT_ADDRESS = '0x809d7ad00d37f8047ed4b741e0fafe52e7183c89'; 
         const CONTRACT_ABI = [
             "function getItemCount() public view returns (uint256)",
             "function getItem(uint256 _itemId) view returns (uint256 id, address reporter, bool isLost, string memory title, string memory description, string memory ipfsCid)",
@@ -65,6 +68,9 @@
         const messageArea = document.getElementById('message');
         const itemsList = document.getElementById('itemsList');
         const loadingStatus = document.getElementById('loadingStatus');
+        const runEngineButton = document.getElementById('runEngineButton');
+
+        const BACKEND_URL = 'http://localhost:3000'; 
 
         // --- Utility Functions ---
 
@@ -172,9 +178,49 @@
             itemsList.insertAdjacentHTML('beforeend', cardHtml);
         }
 
+        async function handleRunEngine() {
+            runEngineButton.disabled = true;
+            runEngineButton.textContent = 'Running...';
+            messageArea.textContent = 'Manually triggering AI matching engine...';
+            let response; // Declare response here to access it in the catch block
+
+            try {
+                response = await fetch(`${BACKEND_URL}/api/run-engine`, { method: 'POST' });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.message || 'Failed to run engine.');
+                }
+                messageArea.textContent = 'AI engine run complete. Refreshing items in 5 seconds...';
+                
+                setTimeout(() => {
+                    messageArea.textContent = 'Reloading items from chain...';
+                    fetchAndDisplayItems();
+                    runEngineButton.disabled = false;
+                    runEngineButton.textContent = 'Trigger AI Match Engine';
+                }, 5000);
+
+            } catch (error) {
+                console.error('Failed to run matching engine:', error);
+                if (error instanceof SyntaxError) {
+                    messageArea.textContent = 'Error: Server sent an invalid response. Check backend logs.';
+                    // Log the raw response to see what we got instead of JSON
+                    if (response) {
+                        response.text().then(text => {
+                            console.error('Raw server response:', text);
+                        });
+                    }
+                } else {
+                    messageArea.textContent = `Error: ${error.message}`;
+                }
+                runEngineButton.disabled = false;
+                runEngineButton.textContent = 'Trigger AI Match Engine';
+            }
+        }
+
         // --- Event Listeners and Initialization ---
         document.addEventListener('DOMContentLoaded', () => {
             connectWalletButton.addEventListener('click', connectWallet);
+            runEngineButton.addEventListener('click', handleRunEngine);
             
             if (window.ethereum && window.ethereum.selectedAddress) {
                 connectWallet();

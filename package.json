@@ -1,4 +1,7 @@
 {
+  "name": "dl-f-server",
+  "version": "1.0.0",
+  "type": "module",
   "dependencies": {
     "@filoz/synapse-sdk": "^0.28.0",
     "@google/genai": "^1.21.0",
