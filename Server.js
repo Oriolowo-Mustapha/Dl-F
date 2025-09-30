@@ -33,21 +33,18 @@ process.on('uncaughtException', (error, origin) => {
     }
 });
 
-import dotenv from 'dotenv';
+const dotenv = require('dotenv');
 dotenv.config({ path: 'credential.env' });
-import express from 'express';
-import multer from 'multer';
-import axios from 'axios';
-import cors from 'cors'; 
-import FormData from 'form-data';
-import fs from 'fs'; 
-import { ethers } from 'ethers';
-import { GoogleGenAI } from '@google/genai';
-import path from 'path'; 
-import { fileURLToPath } from 'url'; 
+const express = require('express');
+const multer = require('multer');
+const axios = require('axios');
+const cors = require('cors'); 
+const FormData = require('form-data');
+const fs = require('fs'); 
+const path = require('path');
+const { ethers } = require('ethers');
+const { GoogleGenAI } = require('@google/genai');
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 
 // --- CONFIGURATION & ENV VAR CHECKS ---
@@ -147,6 +144,10 @@ app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // --- PINATA UPLOAD ENDPOINT ---
 app.post('/api/pin-image', upload.single('file'), async (req, res) => {
@@ -371,22 +372,14 @@ async function runMatchingEngine() {
 }
 
 // Start listening for new items immediately and then run on an interval
-
-
-let serverStarted = false;
-function startServer() {
-    if (serverStarted) return;
-    serverStarted = true;
-
-        // Run the engine periodically as a backup (e.g., every 5 minutes)
-        log("Starting periodic match engine (runs every 5 minutes)...");
-        setInterval(runMatchingEngine, 300000);
-    // --- START SERVER ---
-    app.listen(port, () => {
-        log(`Backend server running at http://localhost:${port}`);
-    });
-}
-
-// Initial setup
 initializeProvider();
-startServer();
+
+// Run the engine periodically as a backup (e.g., every 5 minutes)
+log("Starting periodic match engine (runs every 5 minutes)...");
+setInterval(runMatchingEngine, 300000);
+
+// --- START SERVER ---
+app.listen(port, () => {
+    log(`Backend server running at http://localhost:${port}`);
+});
+
