@@ -143,10 +143,12 @@ initializeProvider();
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-app.use(express.static('public'));
+const publicPath = path.join(__dirname, '..', 'public');
+
+app.use(express.static(publicPath));
 
 app.get('/', (req, res) => {
-    res.sendFile('index.html', { root: 'public' });
+    res.sendFile(path.join(publicPath, 'index.html'));
 });
 
 // --- PINATA UPLOAD ENDPOINT ---
