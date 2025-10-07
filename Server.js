@@ -212,32 +212,68 @@ app.post('/api/run-engine', async (req, res) => {
 // --- GEMINI AI MATCHING ENGINE LOGIC ---
 
 function createSingleMatchPrompt(lostItem, foundItems) {
-    let prompt = `You are a lost and found matching service. Analyze the single LOST item and see if it matches any of the FOUND items in the list.\n\n`;
-    prompt += `Your task is to find the best possible match for the LOST item from the list of FOUND items based on title, description, and similarity. ONLY match items that are highly likely to be the same object.\n\n`;
-    prompt += `LOST Item:\n`;
-    prompt += `ID: ${lostItem.itemId}, Title: "${lostItem.title}", Description: "${lostItem.description}"\n`;
+    let prompt = `You are a lost and found matching service. Your goal is to determine if a single LOST item matches any of the FOUND items in the provided list. A match should only be confirmed if there is a very high degree of confidence that the items are identical.\n\n`;
+    prompt += `Analyze the following items based on their title, description, and, most importantly, their images. The visual similarity between the images is the strongest indicator of a match.\n\n`;
+    prompt += `--- LOST ITEM ---\n`;
+    prompt += `ID: ${lostItem.itemId}\nTitle: "${lostItem.title}"\nDescription: "${lostItem.description}"\nImage CID: ${lostItem.ipfsCid}\n`;
 
-    prompt += "\nFOUND Items:\n";
+    prompt += `\n--- FOUND ITEMS ---\n`;
     foundItems.forEach(item => {
-        prompt += `ID: ${item.itemId}, Title: "${item.title}", Description: "${item.description}"\n`;
+        prompt += `ID: ${item.itemId}\nTitle: "${item.title}"\nDescription: "${item.description}"\nImage CID: ${item.ipfsCid}\n---\n`;
     });
 
-    prompt += `\nIs there a high-confidence match for the LOST item in the list? If yes, output the result in the exact JSON format: {"match": {"lostId": ${lostItem.itemId}, "foundId": [ID_OF_FOUND_ITEM]}}. If no high-confidence match is found, output {"match": null}.`;
+    prompt += `\n--- INSTRUCTIONS ---\n`;
+    prompt += `Compare the LOST item to each FOUND item. If you find a match with a confidence level of 95% or higher, output the result in the following JSON format: {"match": {"lostId": ${lostItem.itemId}, "foundId": [ID_OF_THE_MATCHING_FOUND_ITEM]}}.`;
+    prompt += ` If no item meets this high-confidence threshold, output {"match": null}.`;
     
     return prompt;
 }
 
-async function getGeminiMatch(prompt, lostItemId) {
+async function getGeminiMatch(prompt, lostItem, foundItems) { 
     if (!prompt) return null;
 
+    // Helper to fetch image from IPFS and convert to generative part
+    async function image_to_generative_part(ipfsCid, mimeType) {
+        const imageUrl = `https://gateway.pinata.cloud/ipfs/${ipfsCid}`;
+        try {
+            const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+            const base64 = Buffer.from(response.data, 'binary').toString('base64');
+            return { inlineData: { mimeType, data: base64 } };
+        } catch (error) {
+            console.error(`Failed to fetch or process image from ${imageUrl}:`, error);
+            return null; // Return null if image fetching fails
+        }
+    }
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 2-minute timeout
+    const timeoutId = setTimeout(() => controller.abort(), 120000);
 
     try {
-        const systemPrompt = "Analyze the item descriptions to find a single high-confidence match between the one LOST item and the list of FOUND items. Output ONLY the resulting JSON object.";
+        // --- 1. Construct the multi-modal prompt ---
+        const lostItemImagePart = await image_to_generative_part(lostItem.ipfsCid, 'image/jpeg'); // Assuming jpeg, adjust if needed
+
+        // Base parts array with the main text prompt and the lost item's image
+        const parts = [
+            { text: prompt },
+            lostItemImagePart,
+        ];
+
+        // Add found items' images and descriptions
+        for (const item of foundItems) {
+            const foundItemImagePart = await image_to_generative_part(item.ipfsCid, 'image/jpeg');
+            if (foundItemImagePart) {
+                parts.push({ text: `\n\n--- Next Found Item ---\nID: ${item.itemId}, Title: "${item.title}"` });
+                parts.push(foundItemImagePart);
+            }
+        }
+
+        // Filter out any null image parts
+        const finalParts = parts.filter(part => part !== null);
+
+        const systemPrompt = "Analyze the item descriptions and images to find a single high-confidence match between the one LOST item and the list of FOUND items. The visual similarity of the images is the most important factor. Output ONLY the resulting JSON object.";
 
         const payload = {
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{ parts: finalParts }], // Use the combined text and image parts
             systemInstruction: { parts: [{ text: systemPrompt }] },
             generationConfig: {
                 responseMimeType: "application/json",
@@ -257,7 +293,7 @@ async function getGeminiMatch(prompt, lostItemId) {
             }
         };
 
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
         
         const response = await fetch(apiUrl, {
             method: 'POST',
@@ -273,7 +309,7 @@ async function getGeminiMatch(prompt, lostItemId) {
             const parsedJson = JSON.parse(jsonText);
             if (parsedJson.match && parsedJson.match.foundId) {
                 return {
-                    lostId: Number(lostItemId),
+                    lostId: Number(lostItem.itemId), 
                     foundId: Number(parsedJson.match.foundId)
                 };
             }
@@ -296,7 +332,6 @@ async function getGeminiMatch(prompt, lostItemId) {
 async function runMatchingEngine() {
     log("--- Starting Match Engine Run (New Simplified Logic) ---");
     try {
-        // Aggressive fix: Force re-read of .env and re-create contract object on every run.
         log("Force-reloading .env and creating fresh contract instance...");
         dotenv.config({ path: 'credential.env', override: true });
         const currentWallet = new ethers.Wallet(process.env.MATCHING_ENGINE_PRIVATE_KEY, provider);
@@ -323,6 +358,7 @@ async function runMatchingEngine() {
                 isLost: itemData[2],
                 title: itemData[3],
                 description: itemData[4],
+                ipfsCid: itemData[5], // Include the IPFS CID
                 matchedId: Number(matchedIdBN)
             });
         }
@@ -341,7 +377,7 @@ async function runMatchingEngine() {
         for (const lostItem of unmatchedLostItems) {
             log(`- Searching for a match for LOST item ID: ${lostItem.itemId} ("${lostItem.title}")`);
             const prompt = createSingleMatchPrompt(lostItem, unmatchedFoundItems);
-            const match = await getGeminiMatch(prompt, lostItem.itemId);
+            const match = await getGeminiMatch(prompt, lostItem, unmatchedFoundItems);
 
             if (match) {
                 log(`  -> SUCCESS: AI found a high-confidence match! Lost ID ${match.lostId} <-> Found ID ${match.foundId}`);

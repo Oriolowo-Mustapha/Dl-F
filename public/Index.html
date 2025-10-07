@@ -182,7 +182,7 @@
             runEngineButton.disabled = true;
             runEngineButton.textContent = 'Running...';
             messageArea.textContent = 'Manually triggering AI matching engine...';
-            let response; // Declare response here to access it in the catch block
+            let response; 
 
             try {
                 response = await fetch(`${BACKEND_URL}/api/run-engine`, { method: 'POST' });
@@ -217,7 +217,6 @@
             }
         }
 
-        // --- Event Listeners and Initialization ---
         document.addEventListener('DOMContentLoaded', () => {
             connectWalletButton.addEventListener('click', connectWallet);
             runEngineButton.addEventListener('click', handleRunEngine);
